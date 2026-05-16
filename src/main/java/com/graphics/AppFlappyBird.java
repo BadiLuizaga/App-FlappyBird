@@ -1,98 +1,71 @@
 package com.graphics;
 
-import java.nio.FloatBuffer;
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Random;
 
-import org.lwjgl.BufferUtils;
 import org.lwjgl.glfw.GLFW;
 import org.lwjgl.opengl.GL;
 import org.lwjgl.opengl.GL11;
-import org.lwjgl.opengl.GL15;
 import org.lwjgl.opengl.GL20;
-import org.lwjgl.opengl.GL30;
+import java.awt.Color;
 
 /**
  * AppFlappyBird:
- * Mini-juego estilo Flappy Bird con OpenGL 2D (NDC directo, sin texturas).
- *
- * Estructura del juego:
- * - Jugador (pajaro) representado por un rectangulo.
- * - Obstaculos (tuberias) como rectangulos superior/inferior.
- * - Fisica basica: gravedad + impulso al saltar.
- * - Colision AABB simplificada.
- * - Puntuacion por cada tuberia superada.
- *
- * Nota didactica:
- * Para simplificar la clase, se usa un solo "quad base" (2 triangulos)
- * y se dibuja cualquier rectangulo con uniforms de offset/scale/color.
+ * Mini-juego estilo Flappy Bird con OpenGL 2D.
+ * Soporte para 2 jugadores simultáneos y escalado de dificultad progresivo.
  */
 public class AppFlappyBird {
 
-    // Tamano inicial de ventana.
     private static final int ANCHO = 900;
     private static final int ALTO = 700;
 
-    // Posicion horizontal fija del pajaro en NDC.
-    private static final float BIRD_X = -0.45f;
-    // Tamano del pajaro.
+    private static final float BIRD_X = -0.4f;
     private static final float BIRD_ANCHO = 0.10f;
     private static final float BIRD_ALTO = 0.10f;
-    // Fisica vertical.
     private static final float GRAVEDAD = -1.9f;
     private static final float IMPULSO_SALTO = 0.85f;
     private static final float VELOCIDAD_MAX_CAIDA = -1.8f;
 
-    // Parametros de tuberias.
     private static final float TUBERIA_ANCHO = 0.18f;
     private static final float GAP_ALTO = 0.48f;
-    private static final float VELOCIDAD_TUBERIAS = 0.62f;
-    private static final float TIEMPO_ENTRE_TUBERIAS = 1.5f;
     private static final float GAP_MIN_CENTRO = -0.45f;
     private static final float GAP_MAX_CENTRO = 0.45f;
 
-    // Recursos OpenGL basicos.
+    private int nivelActual = 1;
+    private float velocidadTuberias = 0.62f;
+    private float tiempoEntreTuberias = 1.8f;
+    private static final float MAX_VELOCIDAD = 1.2f;
+    private static final float MIN_TIEMPO_APARICION = 1.0f;
+
     private long window;
     private int programa;
-    private int vao;
-    private int vbo;
-    // Uniforms de transformacion y color.
-    private int uOffsetLocation;
-    private int uScaleLocation;
-    private int uColorLocation;
-    
-    
 
-    // Estado del jugador/juego.
-    private float birdY;
-    private float birdVelY;
+    private Renderer renderizador;
+    private Texture texFondo;
+    private TextRenderer trHud1;
+    private TextRenderer trHud2;
+    private TextRenderer trGameOver;
+    private TextRenderer trTitle;
+
+    private SoundPlayer sonidoSalto;
+    private SoundPlayer sonidoPunto;
+    private SoundPlayer sonidoGameOver;
+
+    private Pajaro j1;
+    private Pajaro j2;
+
     private float timerSpawn;
-    private int puntaje;
-
     private boolean started;
     private boolean gameOver;
     private boolean prevSpace;
+    private boolean prevW;
     private boolean prevR;
 
-    // Lista de obstaculos activos.
     private final List<Tuberia> tuberias = new ArrayList<>();
-    // RNG para variar la posicion del gap.
     private final Random random = new Random();
 
-    // Animación y rotación
-    private float tiempoAleteo = 0f;
-    private int uAngleLocation;       // uniform para ángulo en shader
-    private float ultimoAngulo = 0f;
-    
-
-    /**
-     * Modelo de una tuberia:
-     * x: posicion horizontal comun para parte superior/inferior,
-     * gapCentroY: centro vertical del hueco,
-     * puntuada: evita sumar dos veces la misma tuberia.
-     */
     private static class Tuberia {
         float x;
         float gapCentroY;
@@ -104,23 +77,18 @@ public class AppFlappyBird {
         }
     }
 
-    // Flujo principal de la aplicacion.
     public void run() {
         init();
-        // Estado inicial listo para jugar.
         resetGame();
         loop();
         cleanup();
     }
 
-    // Inicializa GLFW/OpenGL + shaders + geometria base.
     private void init() {
-        // Arranque de GLFW.
         if (!GLFW.glfwInit()) {
             throw new IllegalStateException("No se pudo iniciar GLFW");
         }
 
-        // Config de ventana/contexto.
         GLFW.glfwDefaultWindowHints();
         GLFW.glfwWindowHint(GLFW.GLFW_VISIBLE, GLFW.GLFW_FALSE);
         GLFW.glfwWindowHint(GLFW.GLFW_RESIZABLE, GLFW.GLFW_TRUE);
@@ -129,71 +97,87 @@ public class AppFlappyBird {
         GLFW.glfwWindowHint(GLFW.GLFW_OPENGL_PROFILE, GLFW.GLFW_OPENGL_CORE_PROFILE);
         GLFW.glfwWindowHint(GLFW.GLFW_OPENGL_FORWARD_COMPAT, GLFW.GLFW_TRUE);
 
-        // Crear ventana.
         window = GLFW.glfwCreateWindow(ANCHO, ALTO, "Flappy Bird OpenGL", 0, 0);
         if (window == 0) {
             throw new RuntimeException("No se pudo crear la ventana");
         }
 
-        // Contexto + VSync + mostrar.
         GLFW.glfwMakeContextCurrent(window);
         GLFW.glfwSwapInterval(1);
         GLFW.glfwShowWindow(window);
-        // Cargar funciones OpenGL.
         GL.createCapabilities();
 
-        // Crear pipeline y quad unitario reutilizable.
+        // Habilitar blending para texturas y transparencias
+        GL11.glEnable(GL11.GL_BLEND);
+        GL11.glBlendFunc(GL11.GL_SRC_ALPHA, GL11.GL_ONE_MINUS_SRC_ALPHA);
+
         crearShaders();
-        crearQuadBase();
+        renderizador = new Renderer(programa);
+
+        // Carga de Textura y Renderizadores de Texto
+        texFondo = new Texture("background.png");
+        trHud1 = new TextRenderer(256, 128);
+        trHud2 = new TextRenderer(256, 128);
+        trGameOver = new TextRenderer(512, 256);
+        trTitle = new TextRenderer(512, 128);
+
+        sonidoSalto = new SoundPlayer("/sounds/sfx_wing.wav");
+        sonidoPunto = new SoundPlayer("/sounds/sfx_point.wav");
+        sonidoGameOver = new SoundPlayer("/sounds/sfx_die.wav");
+
+        trTitle.renderText("Flappy Bird", 48, Color.WHITE, true, 1.0f);
+
+        j1 = new Pajaro(BIRD_X, 0.0f);
+        j1.r = 1.0f;
+        j1.g = 1.0f;
+        j1.b = 0.0f;
+
+        j2 = new Pajaro(BIRD_X, 0.0f);
+        j2.r = 1.0f;
+        j2.g = 0.0f;
+        j2.b = 0.0f;
     }
 
-    /**
-     * Crea shaders 2D:
-     * - Vertex: transforma quad base con escala y offset.
-     * - Fragment: color uniforme.
-     */
     private void crearShaders() {
         String vertexSrc = """
                 #version 330 core
                 layout (location = 0) in vec3 aPos;
-                uniform vec2 uOffset;
-                uniform vec2 uScale;
-                uniform float uAngle;
+                layout (location = 1) in vec2 aTexCoord;
+                uniform mat4 uModelMatrix;
+                out vec2 vTexCoord;
                 void main() {
-                    vec2 local = aPos.xy * uScale;
-                    float c = cos(uAngle);
-                    float s = sin(uAngle);
-                    vec2 rotated;
-                    rotated.x = local.x * c - local.y * s;
-                    rotated.y = local.x * s + local.y * c;
-                    vec2 finalPos = rotated + uOffset;
-                    gl_Position = vec4(finalPos, aPos.z, 1.0);
+                    gl_Position = uModelMatrix * vec4(aPos, 1.0);
+                    vTexCoord = aTexCoord;
                 }
                 """;
 
-        // Color solido por objeto.
         String fragmentSrc = """
-            #version 330 core
-            uniform vec3 uColor;
-            out vec4 fragColor;
-            void main() {
-                fragColor = vec4(uColor, 1.0);
-            }
-            """;
+                #version 330 core
+                uniform vec4 uColor;
+                uniform bool uUseTexture;
+                uniform sampler2D uTexture;
+                in vec2 vTexCoord;
+                out vec4 fragColor;
+                void main() {
+                    if (uUseTexture) {
+                        vec4 texColor = texture(uTexture, vTexCoord);
+                        fragColor = texColor * uColor;
+                    } else {
+                        fragColor = uColor;
+                    }
+                }
+                """;
 
-        // Compilar vertex shader.
         int vertexShader = GL20.glCreateShader(GL20.GL_VERTEX_SHADER);
         GL20.glShaderSource(vertexShader, vertexSrc);
         GL20.glCompileShader(vertexShader);
         comprobarShader(vertexShader, "Vertex");
 
-        // Compilar fragment shader.
         int fragmentShader = GL20.glCreateShader(GL20.GL_FRAGMENT_SHADER);
         GL20.glShaderSource(fragmentShader, fragmentSrc);
         GL20.glCompileShader(fragmentShader);
         comprobarShader(fragmentShader, "Fragment");
 
-        // Link de programa.
         programa = GL20.glCreateProgram();
         GL20.glAttachShader(programa, vertexShader);
         GL20.glAttachShader(programa, fragmentShader);
@@ -203,153 +187,57 @@ public class AppFlappyBird {
             throw new RuntimeException("Error al enlazar programa: " + GL20.glGetProgramInfoLog(programa));
         }
 
-        // Resolver uniforms.
-        uOffsetLocation = GL20.glGetUniformLocation(programa, "uOffset");
-        uScaleLocation = GL20.glGetUniformLocation(programa, "uScale");
-        uColorLocation = GL20.glGetUniformLocation(programa, "uColor");
-        uAngleLocation = GL20.glGetUniformLocation(programa, "uAngle");
-        if (uAngleLocation == -1) throw new RuntimeException("No se pudo obtener uAngle");
-        if (uOffsetLocation == -1 || uScaleLocation == -1 || uColorLocation == -1) {
-            throw new RuntimeException("No se pudieron obtener uniforms del shader");
-        }
-
-        // Limpiar objetos shader temporales.
         GL20.glDeleteShader(vertexShader);
         GL20.glDeleteShader(fragmentShader);
     }
 
-    // Verificacion de compilacion GLSL.
     private void comprobarShader(int shader, String tipo) {
         if (GL20.glGetShaderi(shader, GL20.GL_COMPILE_STATUS) == GL11.GL_FALSE) {
             throw new RuntimeException(tipo + " shader: " + GL20.glGetShaderInfoLog(shader));
         }
     }
 
-    /**
-     * Crea un rectangulo unitario centrado en origen:
-     * - Rango x,y de -0.5 a +0.5.
-     * - 2 triangulos (6 vertices).
-     * Cualquier objeto 2D se dibuja escalando y moviendo este quad.
-     */
-
-    private float calcularAngulo (float velY) {
-        float angulo = velY * 0.6f;   // factor de inclinación
-        if (angulo > 0.8f) angulo = 0.8f;
-        if (angulo < -0.8f) angulo = -0.8f;
-        return angulo;
+    private void actualizarTextos() {
+        trHud1.renderText("J1: " + j1.puntaje, 36, Color.YELLOW, true, 1.0f);
+        trHud2.renderText("J2: " + j2.puntaje, 36, Color.RED, true, 1.0f);
     }
 
-    private void dibujarPajaro(float x, float y, float angulo, float tiempoAleteo) {
-        // Establecemos el ángulo de rotación común para todas las partes
-        GL20.glUniform1f(uAngleLocation, angulo);
-        
-        // ---- Cuerpo principal (rectángulo amarillo) ----
-        GL20.glUniform2f(uOffsetLocation, x, y);
-        GL20.glUniform2f(uScaleLocation, 0.12f, 0.12f);
-        GL20.glUniform3f(uColorLocation, 0.98f, 0.85f, 0.20f);
-        GL11.glDrawArrays(GL11.GL_TRIANGLES, 0, 6);
-        
-        // ---- Pico (rectángulo naranja alargado hacia la derecha) ----
-        float picoX = x + 0.09f;
-        float picoY = y - 0.02f;
-        GL20.glUniform2f(uOffsetLocation, picoX, picoY);
-        GL20.glUniform2f(uScaleLocation, 0.08f, 0.04f);
-        GL20.glUniform3f(uColorLocation, 1.0f, 0.5f, 0.0f);
-        GL11.glDrawArrays(GL11.GL_TRIANGLES, 0, 6);
-        
-        // ---- Cola (rectángulo atrás) ----
-        float colaX = x - 0.10f;
-        float colaY = y + 0.02f;
-        GL20.glUniform2f(uOffsetLocation, colaX, colaY);
-        GL20.glUniform2f(uScaleLocation, 0.07f, 0.07f);
-        GL20.glUniform3f(uColorLocation, 0.95f, 0.80f, 0.15f);
-        GL11.glDrawArrays(GL11.GL_TRIANGLES, 0, 6);
-        
-        // ---- Ala (rectángulo que late: cambia su altura según seno) ----
-        float aleteo = 0.5f + 0.3f * (float) Math.sin(tiempoAleteo * 12.0f);
-        float alaAncho = 0.09f;
-        float alaAlto = 0.05f * aleteo;
-        float alaX = x - 0.03f;
-        float alaY = y + 0.04f;
-        GL20.glUniform2f(uOffsetLocation, alaX, alaY);
-        GL20.glUniform2f(uScaleLocation, alaAncho, alaAlto);
-        GL20.glUniform3f(uColorLocation, 0.9f, 0.7f, 0.1f);
-        GL11.glDrawArrays(GL11.GL_TRIANGLES, 0, 6);
-        
-        // ---- Ojo (blanco) ----
-        float ojoX = x + 0.05f;
-        float ojoY = y + 0.05f;
-        GL20.glUniform2f(uOffsetLocation, ojoX, ojoY);
-        GL20.glUniform2f(uScaleLocation, 0.03f, 0.03f);
-        GL20.glUniform3f(uColorLocation, 1.0f, 1.0f, 1.0f);
-        GL11.glDrawArrays(GL11.GL_TRIANGLES, 0, 6);
-        
-        // ---- Pupila (negra) ----
-        float pupilaX = x + 0.057f;
-        float pupilaY = y + 0.048f;
-        GL20.glUniform2f(uOffsetLocation, pupilaX, pupilaY);
-        GL20.glUniform2f(uScaleLocation, 0.012f, 0.012f);
-        GL20.glUniform3f(uColorLocation, 0.0f, 0.0f, 0.0f);
-        GL11.glDrawArrays(GL11.GL_TRIANGLES, 0, 6);
-    }
-
-    private void crearQuadBase() {
-        float[] vertices = {
-            -0.5f, -0.5f, 0.0f,
-            0.5f, -0.5f, 0.0f,
-            0.5f,  0.5f, 0.0f,
-            -0.5f, -0.5f, 0.0f,
-            0.5f,  0.5f, 0.0f,
-            -0.5f,  0.5f, 0.0f
-        };
-
-        // VAO.
-        vao = GL30.glGenVertexArrays();
-        GL30.glBindVertexArray(vao);
-
-        // VBO.
-        vbo = GL15.glGenBuffers();
-        GL15.glBindBuffer(GL15.GL_ARRAY_BUFFER, vbo);
-
-        // Subida de vertices.
-        FloatBuffer buffer = BufferUtils.createFloatBuffer(vertices.length);
-        buffer.put(vertices).flip();
-        GL15.glBufferData(GL15.GL_ARRAY_BUFFER, buffer, GL15.GL_STATIC_DRAW);
-
-        // Atributo posicion.
-        GL20.glVertexAttribPointer(0, 3, GL11.GL_FLOAT, false, 3 * Float.BYTES, 0);
-        GL20.glEnableVertexAttribArray(0);
-
-        // Desbind.
-        GL15.glBindBuffer(GL15.GL_ARRAY_BUFFER, 0);
-        GL30.glBindVertexArray(0);
-    }
-
-    /**
-     * Reinicia estado de partida.
-     * Se usa al iniciar app y al reiniciar tras game over.
-     */
     private void resetGame() {
-        birdY = 0.0f;
-        birdVelY = 0.0f;
+        if (j1 != null) {
+            j1.y = 0.0f;
+            j1.velY = 0.0f;
+            j1.puntaje = 0;
+            j1.estaVivo = true;
+            j1.tiempoAleteo = 0f;
+            j1.tiempoMuerto = 0f;
+        }
+        if (j2 != null) {
+            j2.y = 0.0f;
+            j2.velY = 0.0f;
+            j2.puntaje = 0;
+            j2.estaVivo = true;
+            j2.tiempoAleteo = 0f;
+            j2.tiempoMuerto = 0f;
+        }
         timerSpawn = 0.0f;
-        puntaje = 0;
         started = false;
         gameOver = false;
         tuberias.clear();
+
+        nivelActual = 1;
+        velocidadTuberias = 0.62f;
+        tiempoEntreTuberias = 1.8f;
+
+        actualizarTextos();
         actualizarTitulo();
-        tiempoAleteo = 0f;
     }
 
-    /**
-     * Input del jugador:
-     * - ESC: salir.
-     * - SPACE: empezar/saltar.
-     * - R: reset manual (solo en game over).
-     *
-     * Se usa deteccion de flanco (prevSpace/prevR) para no disparar
-     * multiples acciones mientras tecla permanece presionada.
-     */
+    private void saltarPajaro(Pajaro p) {
+        p.saltar(IMPULSO_SALTO);
+        if (sonidoSalto != null)
+            sonidoSalto.play();
+    }
+
     private void procesarInput() {
         if (GLFW.glfwGetKey(window, GLFW.GLFW_KEY_ESCAPE) == GLFW.GLFW_PRESS) {
             GLFW.glfwSetWindowShouldClose(window, true);
@@ -360,15 +248,45 @@ public class AppFlappyBird {
             if (gameOver) {
                 resetGame();
                 started = true;
-                birdVelY = IMPULSO_SALTO;
-                tiempoAleteo = 0f;  // reinicia la fase para que el ala bata fuerte
-            } else {
+                if (j1.estaVivo)
+                    saltarPajaro(j1);
+                if (j2.estaVivo)
+                    saltarPajaro(j2);
+            } else if (!started) {
                 started = true;
-                birdVelY = IMPULSO_SALTO;
-                tiempoAleteo = 0f;  // reinicia la fase para que el ala bata fuerte
+                if (j1.estaVivo)
+                    saltarPajaro(j1);
+                if (j2.estaVivo)
+                    saltarPajaro(j2);
+            } else {
+                if (j1.estaVivo)
+                    saltarPajaro(j1);
             }
         }
         prevSpace = spaceAhora;
+
+        boolean wAhora = GLFW.glfwGetKey(window, GLFW.GLFW_KEY_W) == GLFW.GLFW_PRESS
+                || GLFW.glfwGetKey(window, GLFW.GLFW_KEY_UP) == GLFW.GLFW_PRESS;
+        if (wAhora && !prevW) {
+            if (gameOver) {
+                resetGame();
+                started = true;
+                if (j1.estaVivo)
+                    saltarPajaro(j1);
+                if (j2.estaVivo)
+                    saltarPajaro(j2);
+            } else if (!started) {
+                started = true;
+                if (j1.estaVivo)
+                    saltarPajaro(j1);
+                if (j2.estaVivo)
+                    saltarPajaro(j2);
+            } else {
+                if (j2.estaVivo)
+                    saltarPajaro(j2);
+            }
+        }
+        prevW = wAhora;
 
         boolean rAhora = GLFW.glfwGetKey(window, GLFW.GLFW_KEY_R) == GLFW.GLFW_PRESS;
         if (rAhora && !prevR && gameOver) {
@@ -377,42 +295,94 @@ public class AppFlappyBird {
         prevR = rAhora;
     }
 
-    /**
-     * Actualizacion de logica por frame (dt en segundos):
-     * - fisica vertical,
-     * - spawn y movimiento de tuberias,
-     * - puntaje y colisiones.
-     */
-    private void actualizar(float dt) {
-        // Actualizar tiempo de aleteo (solo cuando el juego está activo)
-        tiempoAleteo += dt * 2.0f; // velocidad del aleteo
-        if (tiempoAleteo > Math.PI * 2) tiempoAleteo -= Math.PI * 2;
+    private void actualizarDificultad() {
+        int puntajeTotal = (j1 != null ? j1.puntaje : 0) + (j2 != null ? j2.puntaje : 0);
 
-        // Si aun no inicio o ya termino, no avanza simulacion.
+        if (puntajeTotal >= 30) {
+            nivelActual = 5;
+            velocidadTuberias = 1.15f;
+            tiempoEntreTuberias = 1.0f;
+        } else if (puntajeTotal >= 20) {
+            nivelActual = 4;
+            velocidadTuberias = 1.0f;
+            tiempoEntreTuberias = 1.15f;
+        } else if (puntajeTotal >= 12) {
+            nivelActual = 3;
+            velocidadTuberias = 0.85f;
+            tiempoEntreTuberias = 1.3f;
+        } else if (puntajeTotal >= 5) {
+            nivelActual = 2;
+            velocidadTuberias = 0.72f;
+            tiempoEntreTuberias = 1.5f;
+        } else {
+            nivelActual = 1;
+            velocidadTuberias = 0.62f;
+            tiempoEntreTuberias = 1.8f;
+        }
+
+        if (velocidadTuberias > MAX_VELOCIDAD)
+            velocidadTuberias = MAX_VELOCIDAD;
+        if (tiempoEntreTuberias < MIN_TIEMPO_APARICION)
+            tiempoEntreTuberias = MIN_TIEMPO_APARICION;
+    }
+
+    private void morir(Pajaro p) {
+        if (p.estaVivo) {
+            p.estaVivo = false;
+        }
+    }
+
+    private void actualizar(float dt) {
+        j1.actualizarAnimacion(dt);
+        j2.actualizarAnimacion(dt);
+
         if (!started || gameOver) {
             return;
         }
 
-        // Integracion de fisica simple.
-        birdVelY += GRAVEDAD * dt;
-        // Limitar velocidad de caida para sensacion jugable estable.
-        if (birdVelY < VELOCIDAD_MAX_CAIDA) {
-            birdVelY = VELOCIDAD_MAX_CAIDA;
-        }
-        birdY += birdVelY * dt;
+        if (j1.estaVivo || (!j1.estaVivo && j1.y > -1.1f)) {
+            j1.velY += GRAVEDAD * dt;
+            if (j1.velY < VELOCIDAD_MAX_CAIDA)
+                j1.velY = VELOCIDAD_MAX_CAIDA;
+            j1.y += j1.velY * dt;
+            if (!j1.estaVivo)
+                j1.tiempoMuerto += dt;
 
-        // Colision contra techo/suelo NDC.
-        float birdTop = birdY + (BIRD_ALTO * 0.5f);
-        float birdBottom = birdY - (BIRD_ALTO * 0.5f);
-        if (birdTop >= 1.0f || birdBottom <= -1.0f) {
+            float birdTop = j1.y + (BIRD_ALTO * 0.5f);
+            float birdBottom = j1.y - (BIRD_ALTO * 0.5f);
+            if (birdTop >= 1.0f || birdBottom <= -1.0f) {
+                morir(j1);
+            }
+        }
+
+        if (j2.estaVivo || (!j2.estaVivo && j2.y > -1.1f)) {
+            j2.velY += GRAVEDAD * dt;
+            if (j2.velY < VELOCIDAD_MAX_CAIDA)
+                j2.velY = VELOCIDAD_MAX_CAIDA;
+            j2.y += j2.velY * dt;
+            if (!j2.estaVivo)
+                j2.tiempoMuerto += dt;
+
+            float birdTop = j2.y + (BIRD_ALTO * 0.5f);
+            float birdBottom = j2.y - (BIRD_ALTO * 0.5f);
+            if (birdTop >= 1.0f || birdBottom <= -1.0f) {
+                morir(j2);
+            }
+        }
+
+        if (!j1.estaVivo && !j2.estaVivo) {
+            if (!gameOver) {
+                if (sonidoGameOver != null)
+                    sonidoGameOver.play();
+                trGameOver.renderText("FINAL  J1: " + j1.puntaje + "   J2: " + j2.puntaje, 36, Color.WHITE, true, 1.0f);
+            }
             gameOver = true;
             actualizarTitulo();
             return;
         }
 
-        // Temporizador para generar nuevas tuberias.
         timerSpawn += dt;
-        if (timerSpawn >= TIEMPO_ENTRE_TUBERIAS) {
+        if (timerSpawn >= tiempoEntreTuberias) {
             timerSpawn = 0.0f;
             spawnTuberia();
         }
@@ -420,45 +390,55 @@ public class AppFlappyBird {
         Iterator<Tuberia> it = tuberias.iterator();
         while (it.hasNext()) {
             Tuberia t = it.next();
-            // Avance horizontal de obstaculos (derecha -> izquierda).
-            t.x -= VELOCIDAD_TUBERIAS * dt;
+            t.x -= velocidadTuberias * dt;
 
-            // Puntuar cuando la tuberia ya quedo atras del pajaro.
             if (t.x + (TUBERIA_ANCHO * 0.5f) < BIRD_X && !t.puntuada) {
                 t.puntuada = true;
-                puntaje++;
+                if (sonidoPunto != null)
+                    sonidoPunto.play();
+                if (j1.estaVivo)
+                    j1.puntaje++;
+                if (j2.estaVivo)
+                    j2.puntaje++;
+
+                actualizarTextos();
+                actualizarDificultad();
                 actualizarTitulo();
             }
 
-            if (colisionaConTuberia(t)) {
+            if (j1.estaVivo && colisionaConTuberia(t, j1))
+                morir(j1);
+            if (j2.estaVivo && colisionaConTuberia(t, j2))
+                morir(j2);
+
+            if (!j1.estaVivo && !j2.estaVivo) {
+                if (!gameOver) {
+                    if (sonidoGameOver != null)
+                        sonidoGameOver.play();
+                    trGameOver.renderText("FINAL  J1: " + j1.puntaje + "   J2: " + j2.puntaje, 36, Color.WHITE, true,
+                            1.0f);
+                }
                 gameOver = true;
                 actualizarTitulo();
                 return;
             }
 
-            // Remover tuberias fuera de pantalla para no acumular memoria.
             if (t.x + (TUBERIA_ANCHO * 0.5f) < -1.3f) {
                 it.remove();
             }
         }
     }
 
-    // Crea tuberia nueva en borde derecho con gap vertical aleatorio.
     private void spawnTuberia() {
         float gapCentro = GAP_MIN_CENTRO + random.nextFloat() * (GAP_MAX_CENTRO - GAP_MIN_CENTRO);
         tuberias.add(new Tuberia(1.2f, gapCentro));
     }
 
-    /**
-     * Colision AABB simplificada:
-     * 1) Si no hay overlap horizontal, no colisiona.
-     * 2) Si hay overlap horizontal, colisiona si el pajaro esta fuera del gap.
-     */
-    private boolean colisionaConTuberia(Tuberia t) {
-        float birdLeft = BIRD_X - (BIRD_ANCHO * 0.5f);
-        float birdRight = BIRD_X + (BIRD_ANCHO * 0.5f);
-        float birdBottom = birdY - (BIRD_ALTO * 0.5f);
-        float birdTop = birdY + (BIRD_ALTO * 0.5f);
+    private boolean colisionaConTuberia(Tuberia t, Pajaro p) {
+        float birdLeft = p.x - (BIRD_ANCHO * 0.5f);
+        float birdRight = p.x + (BIRD_ANCHO * 0.5f);
+        float birdBottom = p.y - (BIRD_ALTO * 0.5f);
+        float birdTop = p.y + (BIRD_ALTO * 0.5f);
 
         float pipeLeft = t.x - (TUBERIA_ANCHO * 0.5f);
         float pipeRight = t.x + (TUBERIA_ANCHO * 0.5f);
@@ -472,119 +452,161 @@ public class AppFlappyBird {
         return birdTop > gapTop || birdBottom < gapBottom;
     }
 
-    /**
-     * Render del frame:
-     * - fondo,
-     * - tuberias,
-     * - pajaro,
-     * - franja central en game over.
-     */
+    private void dibujarTuberia3D(float x, float centerY, float alto, boolean isTop) {
+        float w = TUBERIA_ANCHO;
+        float capH = 0.08f;
+        float capW = TUBERIA_ANCHO + 0.04f; // Pestaña más ancha
+
+        float edgeX = x - w / 2;
+        float rightX = x + w / 2;
+
+        // Cuerpo: gradiente simulado dibujando 3 tiras (oscuro, claro, oscuro)
+        renderizador.dibujarRect(x - w * 0.25f, centerY, 0f, 0f, 0f, w * 0.5f, alto, 0.2f, 0.6f, 0.2f, 1.0f); // Izquierda
+                                                                                                              // oscura
+        renderizador.dibujarRect(x, centerY, 0f, 0f, 0f, w * 0.4f, alto, 0.4f, 0.8f, 0.3f, 1.0f); // Centro claro
+                                                                                                  // (brillo)
+        renderizador.dibujarRect(x + w * 0.35f, centerY, 0f, 0f, 0f, w * 0.3f, alto, 0.1f, 0.5f, 0.1f, 1.0f); // Derecha
+                                                                                                              // muy
+                                                                                                              // oscura
+
+        // Sombrero (Pestaña)
+        float capY = isTop ? (centerY - alto / 2 + capH / 2) : (centerY + alto / 2 - capH / 2);
+
+        renderizador.dibujarRect(x - capW * 0.25f, capY, 0f, 0f, 0f, capW * 0.5f, capH, 0.2f, 0.6f, 0.2f, 1.0f);
+        renderizador.dibujarRect(x, capY, 0f, 0f, 0f, capW * 0.4f, capH, 0.5f, 0.9f, 0.4f, 1.0f);
+        renderizador.dibujarRect(x + capW * 0.35f, capY, 0f, 0f, 0f, capW * 0.3f, capH, 0.1f, 0.5f, 0.1f, 1.0f);
+    }
+
     private void render() {
-        // Cielo.
         GL11.glClearColor(0.52f, 0.80f, 0.92f, 1.0f);
         GL11.glClear(GL11.GL_COLOR_BUFFER_BIT);
 
-        // Activar pipeline y malla base.
         GL20.glUseProgram(programa);
-        GL30.glBindVertexArray(vao);
-        GL20.glUniform1f(uAngleLocation, 0.0f);
-        
+
+        // 1. Fondo Texturizado
+        renderizador.dibujarTextura(texFondo, 0.0f, 0.0f, 2.0f, 2.0f, 1.0f);
+
+        // 2. Suelo (Franja marrón con pasto verde)
+        renderizador.dibujarRect(0.0f, -0.9f, 0f, 0f, 0f, 2.0f, 0.2f, 0.6f, 0.4f, 0.2f, 1.0f); // Marrón
+        renderizador.dibujarRect(0.0f, -0.78f, 0f, 0f, 0f, 2.0f, 0.04f, 0.4f, 0.8f, 0.3f, 1.0f); // Pasto
+
+        // 3. Tuberías 3D
         for (Tuberia t : tuberias) {
-            // Calcular limites verticales del hueco.
             float gapTop = t.gapCentroY + (GAP_ALTO * 0.5f);
             float gapBottom = t.gapCentroY - (GAP_ALTO * 0.5f);
 
-            // Tramo superior de tuberia.
             float altoSuperior = 1.0f - gapTop;
             if (altoSuperior > 0.0f) {
                 float yCentroSup = gapTop + (altoSuperior * 0.5f);
-                dibujarRect(t.x, yCentroSup, TUBERIA_ANCHO, altoSuperior, 0.18f, 0.70f, 0.25f);
+                dibujarTuberia3D(t.x, yCentroSup, altoSuperior, true);
             }
 
-            // Tramo inferior de tuberia.
             float altoInferior = gapBottom + 1.0f;
-            if (altoInferior > 0.0f) {
-                float yCentroInf = -1.0f + (altoInferior * 0.5f);
-                dibujarRect(t.x, yCentroInf, TUBERIA_ANCHO, altoInferior, 0.18f, 0.70f, 0.25f);
+            // Limitamos a que no cubra el suelo -0.8
+            float sueloTop = -0.8f;
+            if (gapBottom > sueloTop) {
+                float hInf = gapBottom - sueloTop;
+                float yCentroInf = sueloTop + (hInf * 0.5f);
+                dibujarTuberia3D(t.x, yCentroInf, hInf, false);
             }
         }
 
-        // Calcular ángulo según velocidad vertical (solo si el juego está activo, sino ángulo 0)
-        float anguloPajaro = 0f;
-            if (started && !gameOver) {
-                anguloPajaro = calcularAngulo(birdVelY);
-            }
-        dibujarPajaro(BIRD_X, birdY, anguloPajaro, tiempoAleteo);
-        
-        // Overlay simple de game over (sin texto en framebuffer).
-        if (gameOver) {
-            dibujarRect(0.0f, 0.0f, 2.0f, 0.22f, 0.15f, 0.18f, 0.22f);
+        // 4. Pájaros
+        j1.dibujar(renderizador);
+        j2.dibujar(renderizador);
+
+        // 5. HUD
+        // Panel Izquierdo J1
+        renderizador.dibujarRect(-0.7f, 0.85f, 0f, 0f, 0f, 0.5f, 0.2f, 0.1f, 0.1f, 0.1f, 0.6f);
+        renderizador.dibujarTextRenderer(trHud1, -0.7f, 0.85f, 0.5f, 0.25f, 1.0f);
+
+        // Panel Derecho J2
+        renderizador.dibujarRect(0.7f, 0.85f, 0f, 0f, 0f, 0.5f, 0.2f, 0.1f, 0.1f, 0.1f, 0.6f);
+        renderizador.dibujarTextRenderer(trHud2, 0.7f, 0.85f, 0.5f, 0.25f, 1.0f);
+
+        // Panel Central HUD (Nivel)
+        renderizador.dibujarRect(0.0f, 0.9f, 0f, 0f, 0f, 0.25f, 0.15f, 0.1f, 0.1f, 0.1f, 0.7f);
+        for (int i = 0; i < nivelActual; i++) {
+            float offset = (i - (nivelActual - 1) / 2.0f) * 0.035f;
+            renderizador.dibujarRect(offset, 0.9f, 0f, 0f, 0f, 0.02f, 0.08f, 0.3f, 0.8f, 1.0f, 1.0f);
         }
-    }
 
-    // Helper de dibujo parametrico de rectangulos.
-    private void dibujarRect(float x, float y, float ancho, float alto, float r, float g, float b) {
-        // Traslacion del quad.
-        GL20.glUniform2f(uOffsetLocation, x, y);
-        // Escala del quad.
-        GL20.glUniform2f(uScaleLocation, ancho, alto);
-        // Color.
-        GL20.glUniform3f(uColorLocation, r, g, b);
-        // Dibujar 2 triangulos.
-        GL11.glDrawArrays(GL11.GL_TRIANGLES, 0, 6);
-    }
-
-    // Actualiza feedback visual en barra de titulo.
-    private void actualizarTitulo() {
-        String tituloBase = "Flappy Bird OpenGL | Puntos: " + puntaje;
+        // 6. Pantallas UI (Inicio y GameOver)
         if (!started) {
-            GLFW.glfwSetWindowTitle(window, tituloBase + " | SPACE para empezar");
+            renderizador.dibujarRect(0.0f, 0.2f, 0f, 0f, 0f, 1.2f, 0.4f, 0.0f, 0.0f, 0.0f, 0.6f);
+            renderizador.dibujarTextRenderer(trTitle, 0.0f, 0.2f, 1.0f, 0.25f, 1.0f);
+
+            // X roja
+            renderizador.dibujarRect(0.0f, 0.0f, (float) Math.PI / 4, 0f, 0f, 0.05f, 0.2f, 1.0f, 0.2f, 0.2f, 1.0f);
+            renderizador.dibujarRect(0.0f, 0.0f, -(float) Math.PI / 4, 0f, 0f, 0.05f, 0.2f, 1.0f, 0.2f, 0.2f, 1.0f);
+            trGameOver.renderText("Presiona SPACE o W para empezar", 28, Color.LIGHT_GRAY, true, 1.0f);
+            renderizador.dibujarTextRenderer(trGameOver, 0.0f, -0.2f, 1.0f, 0.5f, 1.0f);
         } else if (gameOver) {
-            GLFW.glfwSetWindowTitle(window, tituloBase + " | GAME OVER - SPACE o R para reiniciar");
+            // Panel Game Over
+            renderizador.dibujarRect(0.0f, 0.1f, 0f, 0f, 0f, 1.4f, 0.8f, 0.1f, 0.05f, 0.05f, 0.85f);
+
+            // X roja gigante
+            renderizador.dibujarRect(0.0f, 0.35f, (float) Math.PI / 4, 0f, 0f, 0.08f, 0.3f, 1.0f, 0.2f, 0.2f, 1.0f);
+            renderizador.dibujarRect(0.0f, 0.35f, -(float) Math.PI / 4, 0f, 0f, 0.08f, 0.3f, 1.0f, 0.2f, 0.2f, 1.0f);
+
+            // Puntajes y texto
+            renderizador.dibujarTextRenderer(trGameOver, 0.0f, 0.0f, 1.0f, 0.5f, 1.0f);
+
+            // Reusando trTitle para "Presiona R para reiniciar" de manera hacky o
+            // simplemente crear otro string
+            trTitle.renderText("Presiona R para reiniciar", 30, Color.WHITE, true, 1.0f);
+            renderizador.dibujarTextRenderer(trTitle, 0.0f, -0.2f, 1.0f, 0.25f, 1.0f);
+        }
+    }
+
+    private void actualizarTitulo() {
+        String tituloBase = String.format("Flappy Bird | Nivel: %d | Vel: %.2f", nivelActual, velocidadTuberias);
+        if (!started) {
+            GLFW.glfwSetWindowTitle(window, tituloBase + " | SPACE/W empezar");
+        } else if (gameOver) {
+            GLFW.glfwSetWindowTitle(window, tituloBase + " | GAME OVER");
         } else {
             GLFW.glfwSetWindowTitle(window, tituloBase);
         }
     }
 
-    /**
-     * Bucle principal:
-     * - calcula dt,
-     * - procesa input,
-     * - actualiza logica,
-     * - renderiza,
-     * - swap/poll.
-     */
     private void loop() {
         float ultimoTiempo = (float) GLFW.glfwGetTime();
         while (!GLFW.glfwWindowShouldClose(window)) {
             float ahora = (float) GLFW.glfwGetTime();
             float dt = ahora - ultimoTiempo;
             ultimoTiempo = ahora;
-            // Limite de dt para evitar "saltos" grandes si el frame se congela.
-            if (dt > 0.033f) {
+            if (dt > 0.033f)
                 dt = 0.033f;
-            }
 
             procesarInput();
             actualizar(dt);
             render();
 
-            // Presentar frame y leer eventos.
             GLFW.glfwSwapBuffers(window);
             GLFW.glfwPollEvents();
         }
     }
 
-    // Liberacion de recursos.
     private void cleanup() {
-        GL30.glDeleteVertexArrays(vao);
-        GL15.glDeleteBuffers(vbo);
+        if (renderizador != null)
+            renderizador.cleanup();
+        if (texFondo != null)
+            texFondo.cleanup();
+        if (trHud1 != null)
+            trHud1.cleanup();
+        if (trHud2 != null)
+            trHud2.cleanup();
+        if (trGameOver != null)
+            trGameOver.cleanup();
+        if (trTitle != null)
+            trTitle.cleanup();
+
         GL20.glDeleteProgram(programa);
         GLFW.glfwDestroyWindow(window);
         GLFW.glfwTerminate();
     }
 
-    // Entry point.
     public static void main(String[] args) {
         new AppFlappyBird().run();
     }
